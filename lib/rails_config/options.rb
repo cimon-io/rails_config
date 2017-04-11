@@ -2,9 +2,10 @@ require 'ostruct'
 module RailsConfig
   class Options < OpenStruct
 
-    def empty?
-      marshal_dump.empty?
-    end
+    include Enumerable
+
+    delegate :keys,   to: :marshal_dump
+    delegate :empty?, to: :marshal_dump
 
     def add_source!(source)
       # handle yaml file paths
@@ -13,6 +14,23 @@ module RailsConfig
       @config_sources ||= []
       @config_sources << source
     end
+
+    def reload_env!
+      return self if ENV.nil? || ENV.empty?
+      conf = Hash.new
+      ENV.each do |key, value|
+        next unless key.to_s.index(RailsConfig.const_name) == 0
+        hash = value
+        key.to_s.split('.').reverse.each do |element|
+          hash = {element => hash}
+        end
+        DeepMerge.deep_merge!(hash, conf, :preserve_unmergeables => false)
+      end
+
+      merge!(conf[RailsConfig.const_name] || {})
+    end
+
+    alias :load_env! :reload_env!
 
     # look through all our sources and rebuild the configuration
     def reload!
@@ -29,6 +47,8 @@ module RailsConfig
 
       # swap out the contents of the OStruct with a hash (need to recursively convert)
       marshal_load(__convert(conf).marshal_dump)
+
+      reload_env! if RailsConfig.use_env
 
       return self
     end
@@ -48,6 +68,10 @@ module RailsConfig
       result
     end
 
+    def each(*args, &block)
+      marshal_dump.each(*args, &block)
+    end
+
     def to_json(*args)
       require "json" unless defined?(JSON)
       to_hash.to_json(*args)
@@ -55,9 +79,19 @@ module RailsConfig
 
     def merge!(hash)
       current = to_hash
-      DeepMerge.deep_merge!(current, hash.dup)
-      marshal_load(__convert(hash).marshal_dump)
+      DeepMerge.deep_merge!(hash.dup, current)
+      marshal_load(__convert(current).marshal_dump)
       self
+    end
+
+    # An alternative mechanism for property access.
+    # This let's you do foo['bar'] along with foo.bar.
+    def [](param)
+      send("#{param}")
+    end
+
+    def []=(param, value)
+      send("#{param}=", value)
     end
     
     protected
@@ -67,6 +101,7 @@ module RailsConfig
       s = self.class.new
 
       h.each do |k, v|
+        k = k.to_s if !k.respond_to?(:to_sym) && k.respond_to?(:to_s)
         s.new_ostruct_member(k)
 
         if v.is_a?(Hash)
